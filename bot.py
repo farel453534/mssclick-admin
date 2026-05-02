@@ -1788,7 +1788,7 @@ async def apply_punishment(guild, user, protection_key):
 GENERAL_LOG_CHANNEL = "logs・général"
 
 TICKET_LOG_CHANNEL = "logs・tickets-admin"
-TICKET_LOG_CATEGORY = "MssClick - Logs"
+TICKET_LOG_CATEGORY = "Logs - TicketsAdmin"
 
 AUDIT_LOG_CHANNELS = {k: GENERAL_LOG_CHANNEL for k in [
     "role", "channel", "member", "voice", "message", "server"
