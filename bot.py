@@ -3152,13 +3152,13 @@ async def create_ticket_channel(guild, creator, ticket_info, config, ticket_id, 
 
 
 ADMIN_TICKET_TYPES = {
-    "trahison": {"label": "Ticket Trahison", "short": "trh", "emoji": "⚔️"},
-    "desertion": {"label": "Ticket Desertion", "short": "des", "emoji": "🏃"},
-    "naissance": {"label": "Ticket Naissance", "short": "nai", "emoji": "👶"},
-    "coup_etat": {"label": "Ticket Coup d'Etat", "short": "coup", "emoji": "👑"},
-    "vol": {"label": "Ticket Vol", "short": "vol", "emoji": "💰"},
-    "rpk_joueur": {"label": "Ticket RPK vers un joueur", "short": "rpk", "emoji": "🎯"},
-    "void": {"label": "Ticket VOID", "short": "void", "emoji": "🌀"},
+    "trahison": {"label": "Ticket Trahison", "short": "trh", "emoji": "⚔️", "circle": "🔴"},
+    "desertion": {"label": "Ticket Desertion", "short": "des", "emoji": "🏃", "circle": "🟠"},
+    "naissance": {"label": "Ticket Naissance", "short": "nai", "emoji": "👶", "circle": "🟢"},
+    "coup_etat": {"label": "Ticket Coup d'Etat", "short": "coup", "emoji": "👑", "circle": "🟣"},
+    "vol": {"label": "Ticket Vol", "short": "vol", "emoji": "💰", "circle": "🟡"},
+    "rpk_joueur": {"label": "Ticket RPK vers un joueur", "short": "rpk", "emoji": "🎯", "circle": "🟤"},
+    "void": {"label": "Ticket VOID", "short": "void", "emoji": "🌀", "circle": "⚫"},
 }
 
 ADMIN_TICKET_ORDER = ["trahison", "desertion", "naissance", "coup_etat", "vol", "rpk_joueur", "void"]
@@ -3341,7 +3341,7 @@ async def handle_admin_ticket_creation(interaction: discord.Interaction, ticket_
             return
 
         creator_short = make_short_name(user)
-        channel_name = f"{ticket_info['short']}-{creator_short}"
+        channel_name = f"{ticket_info.get('circle','')}{ticket_info['short']}-{creator_short}"
 
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
