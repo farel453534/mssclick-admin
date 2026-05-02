@@ -160,18 +160,13 @@ async def check_license(interaction):
 
 SLASH_COMMANDS = [
     {"name": "/help", "params": "", "description": "Afficher la liste des commandes du bot."},
-    {"name": "/panel", "params": "", "description": "Gérer les modules du serveur."},
-    {"name": "/logs", "params": "", "description": "Créer automatiquement les salons de logs pour tous les modules."},
-    {"name": "/ticketadmin", "params": "", "description": "Envoyer le panneau d'ouverture de tickets (ancien système)."},
-    {"name": "/ticket", "params": "", "description": "Envoyer le panneau de tickets Admin RP."},
-    {"name": "/blacklist", "params": "", "description": "Gérer la liste noire globale du bot."},
-    {"name": "/unblacklist", "params": "", "description": "Retirer un utilisateur de la blacklist."},
+    {"name": "/logsadmin", "params": "", "description": "Créer le salon de logs des tickets Admin."},
+    {"name": "/ticketadmin", "params": "", "description": "Envoyer le panneau de tickets Admin RP."},
     {"name": "/whitelist", "params": "", "description": "Gérer la liste blanche du serveur."},
     {"name": "/ownerlist", "params": "", "description": "Gérer la liste des créateurs du serveur."},
 ]
 
 TEXT_COMMANDS = [
-    {"name": ".blacklist", "params": "[user]", "description": "Gérer la liste noire du serveur."},
     {"name": ".help", "params": "", "description": "Afficher la liste des commandes du bot."},
     {"name": ".ownerlist", "params": "[user]", "description": "Gérer la liste des créateurs du serveur."},
     {"name": ".whitelist", "params": "[user]", "description": "Gérer la liste blanche du serveur."},
@@ -1600,84 +1595,6 @@ class NexusBot(discord.Client):
                         await log_to_db('info', f'{message.author} added {member} to whitelist in {message.guild.name}')
                 return
 
-        if message.content.strip().lower().startswith(".blacklist"):
-            if not message.guild:
-                return
-            is_allowed = await can_use_bot(message.guild, message.author.id)
-            if not is_allowed:
-                await message.channel.send("Vous ne pouvez pas utiliser le bot.")
-                return
-
-            parts = message.content.strip().split()
-            if len(parts) == 1:
-                embed = await build_blacklist_embed()
-                await message.channel.send(embed=embed)
-                return
-
-            if len(parts) >= 2:
-                target = message.mentions[0] if message.mentions else None
-                if not target:
-                    try:
-                        uid = int(parts[1])
-                    except ValueError:
-                        await message.channel.send("Utilisez `.blacklist @user` ou `.blacklist <ID>`.")
-                        return
-                else:
-                    uid = target.id
-
-                if uid == message.author.id:
-                    await message.channel.send("Vous ne pouvez pas vous blacklister vous-même.")
-                    return
-                if uid == bot.user.id:
-                    await message.channel.send("Vous ne pouvez pas blacklister le bot.")
-                    return
-
-                if uid == BOT_OWNER_ID:
-                    await message.channel.send("Vous ne pouvez pas blacklister le propriétaire du bot.")
-                    return
-
-                if pool:
-                    existing = await pool.fetchrow(
-                        "SELECT id, added_by FROM blacklist WHERE user_id = $1",
-                        str(uid)
-                    )
-                    if existing:
-                        added_by = existing['added_by']
-                        is_bot_owner = message.author.id == BOT_OWNER_ID
-                        is_guild_owner = message.guild and message.guild.owner_id == message.author.id
-                        is_adder = added_by == str(message.author.id)
-                        if not (is_bot_owner or is_guild_owner or is_adder):
-                            await message.channel.send("❌ Seul la personne qui a blacklisté cet utilisateur, le propriétaire du bot ou le créateur du serveur peut l'unblacklist.")
-                            return
-                        await pool.execute("DELETE FROM blacklist WHERE user_id = $1", str(uid))
-                        for guild in bot.guilds:
-                            try:
-                                await guild.unban(discord.Object(id=uid), reason="Shield Blacklist: retiré")
-                            except Exception:
-                                pass
-                        embed = discord.Embed(description=f"<@{uid}> a été retiré de la blacklist et débanni.", color=0x2b2d31)
-                        await message.channel.send(embed=embed)
-                        await log_to_db('info', f'{message.author} removed <@{uid}> from blacklist')
-                    else:
-                        reason = " ".join(parts[2:]) if len(parts) > 2 else None
-                        await pool.execute(
-                            "INSERT INTO blacklist (user_id, reason, added_by) VALUES ($1, $2, $3)",
-                            str(uid), reason, str(message.author.id)
-                        )
-                        banned_servers = []
-                        for guild in bot.guilds:
-                            try:
-                                await guild.ban(discord.Object(id=uid), reason=f"Shield Blacklist: {reason or 'Aucune raison'}")
-                                banned_servers.append(guild.name)
-                            except Exception:
-                                pass
-                        embed = discord.Embed(
-                            description=f"<@{uid}> a bien été banni de **{len(banned_servers)}** serveur(s) avec succès.",
-                            color=0x2b2d31
-                        )
-                        await message.channel.send(embed=embed)
-                        await log_to_db('info', f'{message.author} added <@{uid}> to blacklist')
-                return
 
     async def on_message_delete(self, message):
         if not message.guild or message.author.bot:
@@ -1870,9 +1787,86 @@ async def apply_punishment(guild, user, protection_key):
 
 GENERAL_LOG_CHANNEL = "logs・général"
 
+TICKET_LOG_CHANNEL = "logs・tickets-admin"
+TICKET_LOG_CATEGORY = "MssClick - Logs"
+
 AUDIT_LOG_CHANNELS = {k: GENERAL_LOG_CHANNEL for k in [
     "role", "channel", "member", "voice", "message", "server"
 ]}
+
+
+async def get_ticket_log_channel(guild):
+    try:
+        cat = discord.utils.get(guild.categories, name=TICKET_LOG_CATEGORY)
+        if cat:
+            ch = discord.utils.get(cat.text_channels, name=TICKET_LOG_CHANNEL)
+            if ch:
+                return ch
+        ch = discord.utils.get(guild.text_channels, name=TICKET_LOG_CHANNEL)
+        return ch
+    except Exception:
+        return None
+
+
+async def log_ticket_event(guild, event_type: str, ticket_id: int, ticket_type_key: str,
+                            creator_id: str, channel=None, claimer_id: str = None,
+                            closer=None, opened_at=None, claimed_at=None):
+    try:
+        log_ch = await get_ticket_log_channel(guild)
+        if not log_ch:
+            return
+
+        ticket_info = ADMIN_TICKET_TYPES.get(ticket_type_key, {})
+        type_label = f"{ticket_info.get('emoji', '🎫')} {ticket_info.get('label', ticket_type_key)}"
+
+        if event_type == "open":
+            title = "🟢 Ticket ouvert"
+            color = 0x2ecc71
+        elif event_type == "claim":
+            title = "🟡 Ticket pris en charge"
+            color = 0xf1c40f
+        elif event_type == "close":
+            title = "🔴 Ticket fermé"
+            color = 0xed4245
+        else:
+            title = "Ticket"
+            color = 0x2b2d31
+
+        embed = discord.Embed(title=title, color=color, timestamp=datetime.datetime.utcnow())
+        embed.add_field(name="Type", value=type_label, inline=True)
+        embed.add_field(name="ID Ticket", value=f"`{ticket_id}`", inline=True)
+        if channel is not None:
+            try:
+                embed.add_field(name="Salon", value=f"#{channel.name}", inline=True)
+            except Exception:
+                pass
+
+        if creator_id:
+            embed.add_field(name="Ouvert par", value=f"<@{creator_id}> (`{creator_id}`)", inline=False)
+
+        if claimer_id:
+            embed.add_field(name="Pris en charge par", value=f"<@{claimer_id}> (`{claimer_id}`)", inline=False)
+
+        if closer is not None:
+            embed.add_field(name="Fermé par", value=f"{closer.mention} (`{closer.id}`)", inline=False)
+
+        if opened_at:
+            try:
+                ts = int(opened_at.timestamp())
+                embed.add_field(name="Ouvert le", value=f"<t:{ts}:F>", inline=True)
+            except Exception:
+                pass
+        if claimed_at:
+            try:
+                ts = int(claimed_at.timestamp())
+                embed.add_field(name="Pris en charge le", value=f"<t:{ts}:F>", inline=True)
+            except Exception:
+                pass
+
+        embed.set_footer(text="MssClick • Logs Tickets Admin")
+        await log_ch.send(embed=embed)
+    except Exception as e:
+        logger.error(f"log_ticket_event error: {e}")
 
 
 async def get_general_log_channel(guild):
@@ -2272,7 +2266,6 @@ class WhitelistRemoveSelect(discord.ui.View):
 
 
 @bot.tree.command(name="whitelist", description="Gérer la liste blanche du serveur.")
-@app_commands.default_permissions(administrator=True)
 async def whitelist_command(interaction: discord.Interaction):
     try:
         is_allowed = await is_owner_or_ownerlist(interaction.guild, interaction.user.id)
@@ -2307,299 +2300,6 @@ async def is_blacklisted(user_id):
     return row is not None
 
 
-async def build_blacklist_embed():
-    embed = discord.Embed(
-        title="Blacklist",
-        description="Les utilisateurs blacklistés sont bannis automatiquement de tous les serveurs où le bot est présent.",
-        color=0x2b2d31
-    )
-    if pool:
-        rows = await pool.fetch("SELECT user_id, reason FROM blacklist ORDER BY added_at DESC")
-        if rows:
-            lines = []
-            for i, row in enumerate(rows, 1):
-                reason = row['reason'] or "Aucune raison"
-                lines.append(f"`{i}.` <@{row['user_id']}> — {reason}")
-            embed.add_field(name="Utilisateurs blacklistés", value="\n".join(lines[:20]), inline=False)
-            embed.set_footer(text=f"{len(rows)} utilisateur(s) blacklisté(s)")
-        else:
-            embed.add_field(name="Liste vide", value="Aucun utilisateur blacklisté.", inline=False)
-    return embed
-
-
-class BlacklistView(discord.ui.View):
-    def __init__(self, owner_id):
-        super().__init__(timeout=120)
-        self.owner_id = owner_id
-
-    async def interaction_check(self, interaction: discord.Interaction):
-        if not await can_use_bot(interaction.guild, interaction.user.id):
-            await interaction.response.send_message("Vous ne pouvez pas utiliser le bot.", ephemeral=True)
-            return False
-        return True
-
-    @discord.ui.button(label="Ajouter", style=discord.ButtonStyle.green, custom_id="blacklist_add")
-    async def add_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        modal = BlacklistAddModal(self.owner_id)
-        await interaction.response.send_modal(modal)
-
-    @discord.ui.button(label="Retirer", style=discord.ButtonStyle.red, custom_id="blacklist_remove")
-    async def remove_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not pool:
-            await interaction.response.send_message("Erreur de connexion.", ephemeral=True)
-            return
-        rows = await pool.fetch("SELECT user_id, added_by FROM blacklist")
-        if not rows:
-            await interaction.response.send_message("La blacklist est vide, rien à retirer.", ephemeral=True)
-            return
-        view = BlacklistRemoveSelect(self.owner_id, rows, interaction.guild)
-        await interaction.response.send_message("Sélectionnez l'utilisateur à retirer :", view=view, ephemeral=True)
-
-    @discord.ui.button(label="Liste", style=discord.ButtonStyle.blurple, custom_id="blacklist_list")
-    async def list_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = await build_blacklist_embed()
-        await interaction.response.edit_message(embed=embed, view=self)
-
-
-class BlacklistAddModal(discord.ui.Modal, title="Ajouter à la blacklist"):
-    user_id_input = discord.ui.TextInput(
-        label="ID de l'utilisateur",
-        placeholder="Ex: 123456789012345678",
-        required=True,
-        min_length=17,
-        max_length=20
-    )
-    reason_input = discord.ui.TextInput(
-        label="Raison",
-        placeholder="Raison du blacklist (optionnel)",
-        required=False,
-        max_length=200
-    )
-
-    def __init__(self, owner_id):
-        super().__init__()
-        self.owner_id = owner_id
-
-    async def on_submit(self, interaction: discord.Interaction):
-        user_id_str = self.user_id_input.value.strip()
-        reason = self.reason_input.value.strip() or None
-        try:
-            uid = int(user_id_str)
-        except ValueError:
-            await interaction.response.send_message("ID invalide. Entrez un ID numérique.", ephemeral=True)
-            return
-
-        if uid == interaction.user.id:
-            await interaction.response.send_message("Vous ne pouvez pas vous blacklister vous-même.", ephemeral=True)
-            return
-
-        if uid == bot.user.id:
-            await interaction.response.send_message("Vous ne pouvez pas blacklister le bot.", ephemeral=True)
-            return
-
-        if uid == BOT_OWNER_ID:
-            await interaction.response.send_message("Vous ne pouvez pas blacklister le propriétaire du bot.", ephemeral=True)
-            return
-
-        if pool:
-            existing = await pool.fetchrow(
-                "SELECT id FROM blacklist WHERE user_id = $1",
-                str(uid)
-            )
-            if existing:
-                await interaction.response.send_message(f"<@{uid}> est déjà dans la blacklist.", ephemeral=True)
-                return
-
-            await pool.execute(
-                "INSERT INTO blacklist (user_id, reason, added_by) VALUES ($1, $2, $3)",
-                str(uid), reason, str(interaction.user.id)
-            )
-            await log_to_db('info', f'{interaction.user} added <@{uid}> to blacklist')
-
-            banned_servers = []
-            for guild in bot.guilds:
-                try:
-                    member = guild.get_member(uid)
-                    if not member:
-                        try:
-                            member = await guild.fetch_member(uid)
-                        except discord.NotFound:
-                            continue
-                    await guild.ban(discord.Object(id=uid), reason=f"Shield Blacklist: ajouté par {interaction.user} — {reason or 'Aucune raison'}")
-                    banned_servers.append(guild.name)
-                except Exception as e:
-                    logger.error(f"Failed to ban {uid} from {guild.name}: {e}")
-
-            embed = discord.Embed(
-                description=f"<@{uid}> a bien été banni de **{len(banned_servers)}** serveur(s) avec succès.",
-                color=0x2b2d31
-            )
-            view = BlacklistView(self.owner_id)
-            await interaction.response.edit_message(embed=embed, view=view)
-
-
-class BlacklistRemoveSelect(discord.ui.View):
-    def __init__(self, owner_id, rows, guild):
-        super().__init__(timeout=60)
-        self.owner_id = owner_id
-        self.added_by_map = {row['user_id']: row['added_by'] for row in rows}
-        options = []
-        for row in rows[:25]:
-            uid = row['user_id']
-            member = guild.get_member(int(uid)) if guild else None
-            label = str(member) if member else f"ID: {uid}"
-            options.append(discord.SelectOption(label=label, value=uid))
-        self.select = discord.ui.Select(placeholder="Choisir un utilisateur à retirer...", options=options)
-        self.select.callback = self.select_callback
-        self.add_item(self.select)
-
-    async def interaction_check(self, interaction: discord.Interaction):
-        if not await can_use_bot(interaction.guild, interaction.user.id):
-            await interaction.response.send_message("Vous ne pouvez pas utiliser le bot.", ephemeral=True)
-            return False
-        return True
-
-    async def select_callback(self, interaction: discord.Interaction):
-        uid = self.select.values[0]
-        added_by = self.added_by_map.get(uid)
-        is_bot_owner = interaction.user.id == BOT_OWNER_ID
-        is_guild_owner = interaction.guild and interaction.guild.owner_id == interaction.user.id
-        is_adder = added_by == str(interaction.user.id)
-        if not (is_bot_owner or is_guild_owner or is_adder):
-            await interaction.response.send_message(
-                "❌ Seul la personne qui a blacklisté cet utilisateur, le propriétaire du bot ou le créateur du serveur peut l'unblacklist.",
-                ephemeral=True
-            )
-            return
-        if pool:
-            await pool.execute(
-                "DELETE FROM blacklist WHERE user_id = $1",
-                uid
-            )
-            await log_to_db('info', f'{interaction.user} removed <@{uid}> from blacklist')
-
-            for guild in bot.guilds:
-                try:
-                    await guild.unban(discord.Object(id=int(uid)), reason="Shield Blacklist: retiré de la blacklist")
-                except Exception:
-                    pass
-
-            embed = discord.Embed(
-                description=f"<@{uid}> a été retiré de la blacklist et débanni de tous les serveurs.",
-                color=0x2b2d31
-            )
-            await interaction.response.edit_message(embed=embed, view=None)
-
-
-@bot.tree.command(name="blacklist", description="Gérer la blacklist globale du bot.")
-@app_commands.default_permissions(administrator=True)
-async def blacklist_command(interaction: discord.Interaction):
-    try:
-        if not await can_use_bot(interaction.guild, interaction.user.id):
-            await interaction.response.send_message("Vous ne pouvez pas utiliser le bot.", ephemeral=True)
-            return
-
-        embed = await build_blacklist_embed()
-        view = BlacklistView(interaction.user.id)
-        await interaction.response.send_message(embed=embed, view=view)
-        await log_to_db('info', f'/blacklist used by {interaction.user} in #{interaction.channel}')
-    except Exception as e:
-        logger.error(f"Error in /blacklist command: {traceback.format_exc()}")
-        try:
-            await log_to_db('error', f'Error in /blacklist: {e}')
-        except Exception:
-            pass
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.send_message("Une erreur est survenue.", ephemeral=True)
-        except Exception:
-            pass
-
-
-@bot.tree.command(name="unblacklist", description="Retirer un utilisateur de la blacklist.")
-@app_commands.default_permissions(administrator=True)
-async def unblacklist_command(interaction: discord.Interaction):
-    try:
-        if not await can_use_bot(interaction.guild, interaction.user.id):
-            await interaction.response.send_message("Vous ne pouvez pas utiliser le bot.", ephemeral=True)
-            return
-
-        if not pool:
-            await interaction.response.send_message("Erreur de connexion à la base de données.", ephemeral=True)
-            return
-
-        rows = await pool.fetch("SELECT user_id, added_by FROM blacklist")
-        if not rows:
-            await interaction.response.send_message("La blacklist est vide, rien à retirer.", ephemeral=True)
-            return
-
-        view = UnblacklistSelect(interaction.user.id, rows, interaction.guild)
-        await interaction.response.send_message("Sélectionnez l'utilisateur à retirer de la blacklist :", view=view, ephemeral=True)
-        await log_to_db('info', f'/unblacklist used by {interaction.user} in #{interaction.channel}')
-    except Exception as e:
-        logger.error(f"Error in /unblacklist command: {traceback.format_exc()}")
-        try:
-            await log_to_db('error', f'Error in /unblacklist: {e}')
-        except Exception:
-            pass
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.send_message("Une erreur est survenue.", ephemeral=True)
-        except Exception:
-            pass
-
-
-class UnblacklistSelect(discord.ui.View):
-    def __init__(self, owner_id, rows, guild):
-        super().__init__(timeout=60)
-        self.owner_id = owner_id
-        self.added_by_map = {row['user_id']: row['added_by'] for row in rows}
-        options = []
-        for row in rows[:25]:
-            uid = row['user_id']
-            member = guild.get_member(int(uid)) if guild else None
-            label = str(member) if member else f"ID: {uid}"
-            options.append(discord.SelectOption(label=label, value=uid))
-        self.select = discord.ui.Select(placeholder="Choisir un utilisateur à retirer...", options=options)
-        self.select.callback = self.select_callback
-        self.add_item(self.select)
-
-    async def interaction_check(self, interaction: discord.Interaction):
-        if not await can_use_bot(interaction.guild, interaction.user.id):
-            await interaction.response.send_message("Vous ne pouvez pas utiliser le bot.", ephemeral=True)
-            return False
-        return True
-
-    async def select_callback(self, interaction: discord.Interaction):
-        uid = self.select.values[0]
-        added_by = self.added_by_map.get(uid)
-        is_bot_owner = interaction.user.id == BOT_OWNER_ID
-        is_guild_owner = interaction.guild and interaction.guild.owner_id == interaction.user.id
-        is_adder = added_by == str(interaction.user.id)
-        if not (is_bot_owner or is_guild_owner or is_adder):
-            await interaction.response.send_message(
-                "❌ Seul la personne qui a blacklisté cet utilisateur, le propriétaire du bot ou le créateur du serveur peut l'unblacklist.",
-                ephemeral=True
-            )
-            return
-        if pool:
-            await pool.execute(
-                "DELETE FROM blacklist WHERE user_id = $1",
-                uid
-            )
-            await log_to_db('info', f'{interaction.user} removed <@{uid}> from blacklist via /unblacklist')
-
-            for guild in bot.guilds:
-                try:
-                    await guild.unban(discord.Object(id=int(uid)), reason="Shield Blacklist: retiré de la blacklist")
-                except Exception:
-                    pass
-
-            embed = discord.Embed(
-                description=f"<@{uid}> a été retiré de la blacklist et débanni de tous les serveurs.",
-                color=0x2b2d31
-            )
-            await interaction.response.edit_message(content=None, embed=embed, view=None)
 
 
 PROTECTION_MODULES = [
@@ -2648,7 +2348,6 @@ TIMEOUT_DURATION_OPTIONS = [
     {"label": "1 semaine", "value": "1w"},
 ]
 
-ITEMS_PER_PAGE = 5
 
 PROTECTION_TO_LOG_CHANNEL = {m['key']: GENERAL_LOG_CHANNEL for m in PROTECTION_MODULES}
 
@@ -2715,1059 +2414,11 @@ async def is_protection_enabled(guild_id, key):
     return False
 
 
-def build_panel_page_embed(protections_data, page, total_pages):
-    start = page * ITEMS_PER_PAGE
-    end = start + ITEMS_PER_PAGE
-    page_modules = PROTECTION_MODULES[start:end]
 
-    lines = []
-    for mod in page_modules:
-        key = mod["key"]
-        label = mod["label"]
-        prot = protections_data.get(key)
-        if prot and prot['enabled']:
-            check = " ✅"
-        else:
-            check = ""
-        lines.append(f"⏻ {label}{check}")
 
-    embed = discord.Embed(
-        description="\n\n".join(lines),
-        color=0x2b2d31
-    )
-    embed.set_footer(text=f"Page {page + 1}/{total_pages}")
-    return embed
 
 
-def build_protection_detail_embed(mod, prot, guild):
-    key = mod["key"]
-    label = mod["label"]
-
-    if prot and prot['enabled']:
-        state_str = "✅"
-    else:
-        state_str = "❌"
-
-    log_channel_str = "Non configuré"
-    if prot and prot['log_channel_id']:
-        channel = guild.get_channel(int(prot['log_channel_id']))
-        if channel:
-            log_channel_str = f"{channel.mention}"
-        else:
-            log_channel_str = f"ID: {prot['log_channel_id']}"
-
-    punishment_str = "Bannissement."
-    if prot and prot['punishment']:
-        for p in PUNISHMENT_OPTIONS:
-            if p['value'] == prot['punishment']:
-                punishment_str = f"{p['label']}."
-                break
-
-    timeout_line = ""
-    if prot and prot.get('punishment') == 'timeout':
-        td_val = prot.get('timeout_duration', '1h')
-        td_label = next((td['label'] for td in TIMEOUT_DURATION_OPTIONS if td['value'] == td_val), td_val)
-        timeout_line = f"\nDurée: {td_label}"
-
-    permission_str = "🔒"
-
-    whitelist_bypass = prot.get('whitelist_bypass', False) if prot else False
-    whitelist_line = f"    • Utilisateur dans la liste blanche. {'✅' if whitelist_bypass else '❌'}"
-
-    embed = discord.Embed(
-        description=(
-            f"**• {label}**\n"
-            f"```\n"
-            f"État: {state_str}\n"
-            f"Logs: {log_channel_str}\n"
-            f"Permission: {permission_str}\n"
-            f"Punition: {punishment_str}{timeout_line}\n"
-            f"Autorisé:\n"
-            f"    • Utilisateur dans la liste des propriétaires. ✅\n"
-            f"{whitelist_line}\n"
-            f"```"
-        ),
-        color=0x2b2d31
-    )
-    return embed
-
-
-class PanelView(discord.ui.View):
-    def __init__(self, guild_id, owner_id, protections_data, page=0):
-        super().__init__(timeout=180)
-        self.guild_id = guild_id
-        self.owner_id = owner_id
-        self.protections_data = protections_data
-        self.page = page
-        self.total_pages = (len(PROTECTION_MODULES) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
-        self._update_buttons()
-
-    def _update_buttons(self):
-        self.clear_items()
-
-        start = self.page * ITEMS_PER_PAGE
-        end = start + ITEMS_PER_PAGE
-        page_modules = PROTECTION_MODULES[start:end]
-
-        options = []
-        for mod in page_modules:
-            key = mod["key"]
-            label = mod["label"]
-            prot = self.protections_data.get(key)
-            if prot and prot['enabled']:
-                desc = "Activé"
-            else:
-                desc = "Désactivé"
-            options.append(discord.SelectOption(label=label, value=key, description=desc))
-
-        select = discord.ui.Select(
-            placeholder="Sélectionner un module...",
-            options=options,
-            custom_id="panel_select"
-        )
-        select.callback = self.select_callback
-        self.add_item(select)
-
-        prev_btn = discord.ui.Button(label="◀", style=discord.ButtonStyle.secondary, custom_id="panel_prev", disabled=(self.page == 0))
-        prev_btn.callback = self.prev_callback
-        self.add_item(prev_btn)
-
-        next_btn = discord.ui.Button(label="▶", style=discord.ButtonStyle.secondary, custom_id="panel_next", disabled=(self.page >= self.total_pages - 1))
-        next_btn.callback = self.next_callback
-        self.add_item(next_btn)
-
-    async def interaction_check(self, interaction: discord.Interaction):
-        if interaction.user.id != self.owner_id:
-            await interaction.response.send_message("Vous n'êtes pas autorisé à utiliser ce menu.", ephemeral=True)
-            return False
-        return True
-
-    async def select_callback(self, interaction: discord.Interaction):
-        try:
-            key = interaction.data['values'][0]
-            mod = next((m for m in PROTECTION_MODULES if m['key'] == key), None)
-            if not mod:
-                return
-            prot = self.protections_data.get(key)
-            embed = build_protection_detail_embed(mod, prot, interaction.guild)
-            detail_view = ProtectionDetailView(self.guild_id, self.owner_id, key, self.protections_data, self.page)
-            await interaction.response.edit_message(embed=embed, view=detail_view)
-        except Exception as e:
-            logger.error(f"Error in panel select_callback: {traceback.format_exc()}")
-            try:
-                await log_to_db('error', f'Error in panel select: {e}')
-            except Exception:
-                pass
-            try:
-                if not interaction.response.is_done():
-                    await interaction.response.send_message("Une erreur est survenue.", ephemeral=True)
-            except Exception:
-                pass
-
-    async def prev_callback(self, interaction: discord.Interaction):
-        try:
-            if self.page > 0:
-                self.page -= 1
-                self._update_buttons()
-                embed = build_panel_page_embed(self.protections_data, self.page, self.total_pages)
-                await interaction.response.edit_message(embed=embed, view=self)
-        except Exception as e:
-            logger.error(f"Error in panel prev_callback: {traceback.format_exc()}")
-            try:
-                if not interaction.response.is_done():
-                    await interaction.response.send_message("Une erreur est survenue.", ephemeral=True)
-            except Exception:
-                pass
-
-    async def next_callback(self, interaction: discord.Interaction):
-        try:
-            if self.page < self.total_pages - 1:
-                self.page += 1
-                self._update_buttons()
-                embed = build_panel_page_embed(self.protections_data, self.page, self.total_pages)
-                await interaction.response.edit_message(embed=embed, view=self)
-        except Exception as e:
-            logger.error(f"Error in panel next_callback: {traceback.format_exc()}")
-            try:
-                if not interaction.response.is_done():
-                    await interaction.response.send_message("Une erreur est survenue.", ephemeral=True)
-            except Exception:
-                pass
-
-
-class ProtectionDetailView(discord.ui.View):
-    def __init__(self, guild_id, owner_id, protection_key, protections_data, page):
-        super().__init__(timeout=180)
-        self.guild_id = guild_id
-        self.owner_id = owner_id
-        self.protection_key = protection_key
-        self.protections_data = protections_data
-        self.page = page
-        self.total_pages = (len(PROTECTION_MODULES) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
-        self._build_items()
-
-    def _build_items(self):
-        self.clear_items()
-        prot = self.protections_data.get(self.protection_key)
-        is_on = prot and prot['enabled']
-
-        mod = next((m for m in PROTECTION_MODULES if m['key'] == self.protection_key), None)
-        current_label = mod['label'] if mod else self.protection_key
-
-        start = self.page * ITEMS_PER_PAGE
-        end = start + ITEMS_PER_PAGE
-        page_modules = PROTECTION_MODULES[start:end]
-        module_options = []
-        for m in page_modules:
-            is_default = (m['key'] == self.protection_key)
-            module_options.append(discord.SelectOption(
-                label=m['label'],
-                value=m['key'],
-                emoji="⚙️",
-                default=is_default
-            ))
-        module_select = discord.ui.Select(
-            placeholder=current_label,
-            options=module_options,
-            custom_id="prot_module_select",
-            row=0
-        )
-        module_select.callback = self.module_select_callback
-        self.add_item(module_select)
-
-        current_punishment = prot['punishment'] if prot and prot['punishment'] else 'ban'
-        punishment_options = []
-        for p in PUNISHMENT_OPTIONS:
-            punishment_options.append(discord.SelectOption(
-                label=f"{p['label']}.",
-                value=p['value'],
-                default=(p['value'] == current_punishment)
-            ))
-        punishment_select = discord.ui.Select(
-            placeholder="Bannissement.",
-            options=punishment_options,
-            custom_id="prot_punishment",
-            row=1
-        )
-        punishment_select.callback = self.punishment_callback
-        self.add_item(punishment_select)
-
-        if current_punishment == 'timeout':
-            current_timeout = prot['timeout_duration'] if prot and prot.get('timeout_duration') else '1h'
-            timeout_options = []
-            for td in TIMEOUT_DURATION_OPTIONS:
-                timeout_options.append(discord.SelectOption(
-                    label=td['label'],
-                    value=td['value'],
-                    default=(td['value'] == current_timeout)
-                ))
-            timeout_select = discord.ui.Select(
-                placeholder="Durée de l'exclusion...",
-                options=timeout_options,
-                custom_id="prot_timeout_duration",
-                row=2
-            )
-            timeout_select.callback = self.timeout_duration_callback
-            self.add_item(timeout_select)
-
-        if is_on:
-            toggle_btn = discord.ui.Button(emoji="🛑", label="Désactiver", style=discord.ButtonStyle.secondary, custom_id="prot_toggle", row=3)
-        else:
-            toggle_btn = discord.ui.Button(emoji="🛑", label="Activer", style=discord.ButtonStyle.secondary, custom_id="prot_toggle", row=3)
-        toggle_btn.callback = self.toggle_callback
-        self.add_item(toggle_btn)
-
-        wb = prot.get('whitelist_bypass', False) if prot else False
-        if wb:
-            wl_btn = discord.ui.Button(emoji="✅", label="Whitelist", style=discord.ButtonStyle.green, custom_id="prot_whitelist_bypass", row=3)
-        else:
-            wl_btn = discord.ui.Button(emoji="❌", label="Whitelist", style=discord.ButtonStyle.secondary, custom_id="prot_whitelist_bypass", row=3)
-        wl_btn.callback = self.whitelist_bypass_callback
-        self.add_item(wl_btn)
-
-        log_btn = discord.ui.Button(emoji="📝", label="Logs", style=discord.ButtonStyle.secondary, custom_id="prot_logs", row=3)
-        log_btn.callback = self.logs_callback
-        self.add_item(log_btn)
-
-        salon_btn = discord.ui.Button(emoji="📢", label="Salon", style=discord.ButtonStyle.primary, custom_id="prot_salon", row=3)
-        salon_btn.callback = self.salon_callback
-        self.add_item(salon_btn)
-
-        if self.protection_key in ("anti_gif_spam", "anti_mention_spam"):
-            targets_btn = discord.ui.Button(emoji="🎯", label="Cibles", style=discord.ButtonStyle.primary, custom_id="prot_targets", row=4)
-            targets_btn.callback = self.targets_callback
-            self.add_item(targets_btn)
-
-        back_btn = discord.ui.Button(emoji="↩️", label="Retour", style=discord.ButtonStyle.danger, custom_id="prot_back", row=4)
-        back_btn.callback = self.back_callback
-        self.add_item(back_btn)
-
-    async def targets_callback(self, interaction: discord.Interaction):
-        try:
-            if self.protection_key == "anti_gif_spam":
-                view = GifSpamTargetsView(self.guild_id, self.owner_id, self.protections_data, self.page)
-                embed = await build_gif_targets_embed(self.guild_id, interaction.guild)
-            else:
-                view = MentionSpamTargetsView(self.guild_id, self.owner_id, self.protections_data, self.page)
-                embed = await build_mention_targets_embed(self.guild_id, interaction.guild)
-            await interaction.response.edit_message(embed=embed, view=view)
-        except Exception as e:
-            logger.error(f"Error in targets_callback: {traceback.format_exc()}")
-            try:
-                if not interaction.response.is_done():
-                    await interaction.response.send_message("Une erreur est survenue.", ephemeral=True)
-            except Exception:
-                pass
-
-    async def back_callback(self, interaction: discord.Interaction):
-        try:
-            embed = build_panel_page_embed(self.protections_data, self.page, self.total_pages)
-            view = PanelView(self.guild_id, self.owner_id, self.protections_data, self.page)
-            await interaction.response.edit_message(embed=embed, view=view)
-        except Exception as e:
-            logger.error(f"Error in back_callback: {traceback.format_exc()}")
-            try:
-                if not interaction.response.is_done():
-                    await interaction.response.send_message("Une erreur est survenue.", ephemeral=True)
-            except Exception:
-                pass
-
-    async def interaction_check(self, interaction: discord.Interaction):
-        if interaction.user.id != self.owner_id:
-            await interaction.response.send_message("Vous n'êtes pas autorisé à utiliser ce menu.", ephemeral=True)
-            return False
-        return True
-
-    async def module_select_callback(self, interaction: discord.Interaction):
-        try:
-            key = interaction.data['values'][0]
-            self.protection_key = key
-            mod = next((m for m in PROTECTION_MODULES if m['key'] == key), None)
-            if not mod:
-                return
-            prot = self.protections_data.get(key)
-            embed = build_protection_detail_embed(mod, prot, interaction.guild)
-            self._build_items()
-            await interaction.response.edit_message(embed=embed, view=self)
-        except Exception as e:
-            logger.error(f"Error in module_select_callback: {traceback.format_exc()}")
-            try:
-                await log_to_db('error', f'Error in module_select_callback: {e}')
-            except Exception:
-                pass
-            try:
-                if not interaction.response.is_done():
-                    await interaction.response.send_message("Une erreur est survenue.", ephemeral=True)
-            except Exception:
-                pass
-
-    async def toggle_callback(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        try:
-            prot = self.protections_data.get(self.protection_key)
-            new_state = not (prot and prot['enabled'])
-            await set_protection(self.guild_id, self.protection_key, enabled=new_state)
-            if self.protection_key not in self.protections_data or not self.protections_data[self.protection_key]:
-                self.protections_data[self.protection_key] = {'enabled': new_state, 'log_channel_id': None, 'punishment': 'ban'}
-            else:
-                self.protections_data[self.protection_key]['enabled'] = new_state
-            mod = next((m for m in PROTECTION_MODULES if m['key'] == self.protection_key), None)
-            embed = build_protection_detail_embed(mod, self.protections_data[self.protection_key], interaction.guild)
-            self._build_items()
-            await interaction.message.edit(embed=embed, view=self)
-            state_label = "activé" if new_state else "désactivé"
-            await log_to_db('info', f'{interaction.user} {state_label} {mod["label"]} dans {interaction.guild.name}')
-        except Exception as e:
-            logger.error(f"Error in toggle_callback: {traceback.format_exc()}")
-            try:
-                await log_to_db('error', f'Error in toggle_callback: {e}')
-            except Exception:
-                pass
-
-    async def whitelist_bypass_callback(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        try:
-            prot = self.protections_data.get(self.protection_key)
-            current_wb = prot.get('whitelist_bypass', False) if prot else False
-            new_wb = not current_wb
-            await set_protection(self.guild_id, self.protection_key, whitelist_bypass=new_wb)
-            if self.protection_key not in self.protections_data or not self.protections_data[self.protection_key]:
-                self.protections_data[self.protection_key] = {'enabled': False, 'log_channel_id': None, 'punishment': 'ban', 'timeout_duration': '1h', 'whitelist_bypass': new_wb}
-            else:
-                self.protections_data[self.protection_key]['whitelist_bypass'] = new_wb
-            mod = next((m for m in PROTECTION_MODULES if m['key'] == self.protection_key), None)
-            embed = build_protection_detail_embed(mod, self.protections_data[self.protection_key], interaction.guild)
-            self._build_items()
-            await interaction.message.edit(embed=embed, view=self)
-            status = "activé" if new_wb else "désactivé"
-            await log_to_db('info', f'{interaction.user} {status} whitelist bypass for {mod["label"]} in {interaction.guild.name}')
-        except Exception as e:
-            logger.error(f"Error in whitelist_bypass_callback: {traceback.format_exc()}")
-            try:
-                await log_to_db('error', f'Error in whitelist_bypass_callback: {e}')
-            except Exception:
-                pass
-
-    async def logs_callback(self, interaction: discord.Interaction):
-        await self._auto_assign_log_channel(interaction)
-
-    async def salon_callback(self, interaction: discord.Interaction):
-        await self._auto_assign_log_channel(interaction)
-
-    async def _auto_assign_log_channel(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        try:
-            expected_channel_name = PROTECTION_TO_LOG_CHANNEL.get(self.protection_key)
-            if not expected_channel_name:
-                await interaction.followup.send("Aucun salon de logs associé à cette protection.", ephemeral=True)
-                return
-
-            guild = interaction.guild
-            log_ch = None
-            category = discord.utils.get(guild.categories, name="RShield - Logs")
-            if category:
-                log_ch = discord.utils.get(category.text_channels, name=expected_channel_name)
-
-            if not log_ch:
-                await interaction.followup.send(
-                    f"Le salon `{expected_channel_name}` n'existe pas. Utilisez `/logs` d'abord pour créer les salons de logs.",
-                    ephemeral=True
-                )
-                return
-
-            prot = self.protections_data.get(self.protection_key)
-            current_log = prot.get('log_channel_id') if prot else None
-
-            if current_log == str(log_ch.id):
-                await set_protection(self.guild_id, self.protection_key, log_channel_id="")
-                if self.protections_data.get(self.protection_key):
-                    self.protections_data[self.protection_key]['log_channel_id'] = None
-                mod = next((m for m in PROTECTION_MODULES if m['key'] == self.protection_key), None)
-                embed = build_protection_detail_embed(mod, self.protections_data.get(self.protection_key), guild)
-                self._build_items()
-                await interaction.message.edit(embed=embed, view=self)
-                await log_to_db('info', f'{interaction.user} removed log channel for {mod["label"]} in {guild.name}')
-            else:
-                await set_protection(self.guild_id, self.protection_key, log_channel_id=str(log_ch.id))
-                if self.protection_key not in self.protections_data or not self.protections_data[self.protection_key]:
-                    self.protections_data[self.protection_key] = {'enabled': False, 'log_channel_id': str(log_ch.id), 'punishment': 'ban'}
-                else:
-                    self.protections_data[self.protection_key]['log_channel_id'] = str(log_ch.id)
-                mod = next((m for m in PROTECTION_MODULES if m['key'] == self.protection_key), None)
-                embed = build_protection_detail_embed(mod, self.protections_data.get(self.protection_key), guild)
-                self._build_items()
-                await interaction.message.edit(embed=embed, view=self)
-                await log_to_db('info', f'{interaction.user} set log channel to {log_ch.name} for {mod["label"]} in {guild.name}')
-        except Exception as e:
-            logger.error(f"Error in _auto_assign_log_channel: {traceback.format_exc()}")
-            try:
-                await log_to_db('error', f'Error in _auto_assign_log_channel: {e}')
-            except Exception:
-                pass
-
-    async def timeout_duration_callback(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        try:
-            value = interaction.data['values'][0]
-            await set_protection(self.guild_id, self.protection_key, timeout_duration=value)
-            if self.protection_key not in self.protections_data or not self.protections_data[self.protection_key]:
-                self.protections_data[self.protection_key] = {'enabled': False, 'log_channel_id': None, 'punishment': 'timeout', 'timeout_duration': value}
-            else:
-                self.protections_data[self.protection_key]['timeout_duration'] = value
-            mod = next((m for m in PROTECTION_MODULES if m['key'] == self.protection_key), None)
-            embed = build_protection_detail_embed(mod, self.protections_data[self.protection_key], interaction.guild)
-            self._build_items()
-            await interaction.message.edit(embed=embed, view=self)
-            td_label = next((td['label'] for td in TIMEOUT_DURATION_OPTIONS if td['value'] == value), value)
-            await log_to_db('info', f'{interaction.user} set timeout duration for {mod["label"]} to {td_label} in {interaction.guild.name}')
-        except Exception as e:
-            logger.error(f"Error in timeout_duration_callback: {traceback.format_exc()}")
-            try:
-                await log_to_db('error', f'Error in timeout_duration_callback: {e}')
-            except Exception:
-                pass
-
-    async def punishment_callback(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        try:
-            value = interaction.data['values'][0]
-            await set_protection(self.guild_id, self.protection_key, punishment=value)
-            if self.protection_key not in self.protections_data or not self.protections_data[self.protection_key]:
-                self.protections_data[self.protection_key] = {'enabled': False, 'log_channel_id': None, 'punishment': value}
-            else:
-                self.protections_data[self.protection_key]['punishment'] = value
-            mod = next((m for m in PROTECTION_MODULES if m['key'] == self.protection_key), None)
-            embed = build_protection_detail_embed(mod, self.protections_data[self.protection_key], interaction.guild)
-            self._build_items()
-            await interaction.message.edit(embed=embed, view=self)
-            p_label = next((p['label'] for p in PUNISHMENT_OPTIONS if p['value'] == value), value)
-            await log_to_db('info', f'{interaction.user} changed punishment for {mod["label"]} to {p_label} in {interaction.guild.name}')
-        except Exception as e:
-            logger.error(f"Error in punishment_callback: {traceback.format_exc()}")
-            try:
-                await log_to_db('error', f'Error in punishment_callback: {e}')
-            except Exception:
-                pass
-
-
-async def build_gif_targets_embed(guild_id, guild):
-    lines = []
-    if pool:
-        rows = await pool.fetch(
-            "SELECT user_id FROM gif_spam_targets WHERE guild_id = $1 ORDER BY added_at DESC",
-            str(guild_id)
-        )
-        if rows:
-            for i, row in enumerate(rows, 1):
-                uid = row['user_id']
-                member = guild.get_member(int(uid))
-                if member:
-                    lines.append(f"`{i}.` {member.mention} (`{uid}`)")
-                else:
-                    lines.append(f"`{i}.` Utilisateur inconnu (`{uid}`)")
-        else:
-            lines.append("Aucune cible configurée.")
-    else:
-        lines.append("Base de données indisponible.")
-
-    embed = discord.Embed(
-        title="🎯 Cibles — Spam de GIF",
-        description="\n".join(lines),
-        color=0x2b2d31
-    )
-    embed.set_footer(text="5 GIFs en 40 secondes = punition")
-    return embed
-
-
-class GifSpamTargetsView(discord.ui.View):
-    def __init__(self, guild_id, owner_id, protections_data, page):
-        super().__init__(timeout=180)
-        self.guild_id = guild_id
-        self.owner_id = owner_id
-        self.protections_data = protections_data
-        self.page = page
-        self._build_items()
-
-    def _build_items(self):
-        self.clear_items()
-        prot = self.protections_data.get("anti_gif_spam")
-        current_punishment = prot['punishment'] if prot and prot['punishment'] else 'ban'
-
-        punishment_options = []
-        for p in PUNISHMENT_OPTIONS:
-            punishment_options.append(discord.SelectOption(
-                label=p['label'],
-                value=p['value'],
-                default=(p['value'] == current_punishment)
-            ))
-        punishment_select = discord.ui.Select(
-            placeholder="Punition...",
-            options=punishment_options,
-            custom_id="gif_punishment",
-            row=0
-        )
-        punishment_select.callback = self.punishment_callback
-        self.add_item(punishment_select)
-
-        if current_punishment == 'timeout':
-            current_timeout = prot.get('timeout_duration', '1h') if prot else '1h'
-            timeout_options = []
-            for td in TIMEOUT_DURATION_OPTIONS:
-                timeout_options.append(discord.SelectOption(
-                    label=td['label'],
-                    value=td['value'],
-                    default=(td['value'] == current_timeout)
-                ))
-            timeout_select = discord.ui.Select(
-                placeholder="Durée de l'exclusion...",
-                options=timeout_options,
-                custom_id="gif_timeout_dur",
-                row=1
-            )
-            timeout_select.callback = self.timeout_duration_callback
-            self.add_item(timeout_select)
-
-        add_btn = discord.ui.Button(label="Ajouter une cible", style=discord.ButtonStyle.green, emoji="➕", custom_id="gif_add", row=2)
-        add_btn.callback = self.add_target
-        self.add_item(add_btn)
-
-        remove_btn = discord.ui.Button(label="Retirer une cible", style=discord.ButtonStyle.red, emoji="➖", custom_id="gif_remove", row=2)
-        remove_btn.callback = self.remove_target
-        self.add_item(remove_btn)
-
-        back_btn = discord.ui.Button(label="Retour", style=discord.ButtonStyle.danger, emoji="↩️", custom_id="gif_back", row=3)
-        back_btn.callback = self.back
-        self.add_item(back_btn)
-
-    async def interaction_check(self, interaction: discord.Interaction):
-        is_allowed = await is_owner_or_ownerlist(interaction.guild, interaction.user.id)
-        if not is_allowed:
-            await interaction.response.send_message("Vous n'êtes pas autorisé.", ephemeral=True)
-            return False
-        return True
-
-    async def punishment_callback(self, interaction: discord.Interaction):
-        value = interaction.data['values'][0]
-        await set_protection(self.guild_id, "anti_gif_spam", punishment=value)
-        if "anti_gif_spam" not in self.protections_data or not self.protections_data["anti_gif_spam"]:
-            self.protections_data["anti_gif_spam"] = {'enabled': False, 'log_channel_id': None, 'punishment': value, 'timeout_duration': '1h'}
-        else:
-            self.protections_data["anti_gif_spam"]['punishment'] = value
-        self._build_items()
-        embed = await build_gif_targets_embed(self.guild_id, interaction.guild)
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    async def timeout_duration_callback(self, interaction: discord.Interaction):
-        value = interaction.data['values'][0]
-        await set_protection(self.guild_id, "anti_gif_spam", timeout_duration=value)
-        if self.protections_data.get("anti_gif_spam"):
-            self.protections_data["anti_gif_spam"]['timeout_duration'] = value
-        self._build_items()
-        embed = await build_gif_targets_embed(self.guild_id, interaction.guild)
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    async def add_target(self, interaction: discord.Interaction):
-        modal = GifSpamAddTargetModal(self.guild_id, self.owner_id, self.protections_data, self.page)
-        await interaction.response.send_modal(modal)
-
-    async def remove_target(self, interaction: discord.Interaction):
-        if not pool:
-            await interaction.response.send_message("Base de données indisponible.", ephemeral=True)
-            return
-        rows = await pool.fetch(
-            "SELECT user_id FROM gif_spam_targets WHERE guild_id = $1 ORDER BY added_at DESC",
-            str(self.guild_id)
-        )
-        if not rows:
-            await interaction.response.send_message("Aucune cible à retirer.", ephemeral=True)
-            return
-        options = []
-        for row in rows[:25]:
-            uid = row['user_id']
-            member = interaction.guild.get_member(int(uid))
-            label = str(member) if member else f"ID: {uid}"
-            options.append(discord.SelectOption(label=label, value=uid))
-        view = GifSpamRemoveSelect(self.guild_id, self.owner_id, self.protections_data, self.page, options, interaction.guild)
-        await interaction.response.edit_message(view=view)
-
-    async def back(self, interaction: discord.Interaction):
-        mod = next((m for m in PROTECTION_MODULES if m['key'] == "anti_gif_spam"), None)
-        prot = self.protections_data.get("anti_gif_spam")
-        embed = build_protection_detail_embed(mod, prot, interaction.guild)
-        detail_view = ProtectionDetailView(self.guild_id, self.owner_id, "anti_gif_spam", self.protections_data, self.page)
-        await interaction.response.edit_message(embed=embed, view=detail_view)
-
-
-class GifSpamAddTargetModal(discord.ui.Modal, title="Ajouter une cible GIF"):
-    user_id_input = discord.ui.TextInput(
-        label="ID de l'utilisateur",
-        placeholder="Ex: 123456789012345678",
-        required=True,
-        min_length=17,
-        max_length=20
-    )
-
-    def __init__(self, guild_id, owner_id, protections_data, page):
-        super().__init__()
-        self.guild_id = guild_id
-        self.owner_id = owner_id
-        self.protections_data = protections_data
-        self.page = page
-
-    async def on_submit(self, interaction: discord.Interaction):
-        user_id_str = self.user_id_input.value.strip()
-        try:
-            uid = int(user_id_str)
-        except ValueError:
-            await interaction.response.send_message("ID invalide. Entrez un ID numérique.", ephemeral=True)
-            return
-
-        member = interaction.guild.get_member(uid)
-        if not member:
-            try:
-                member = await interaction.guild.fetch_member(uid)
-            except discord.NotFound:
-                await interaction.response.send_message("Membre introuvable sur ce serveur.", ephemeral=True)
-                return
-
-        if pool:
-            existing = await pool.fetchrow(
-                "SELECT id FROM gif_spam_targets WHERE guild_id = $1 AND user_id = $2",
-                str(self.guild_id), str(uid)
-            )
-            if existing:
-                await interaction.response.send_message(f"{member.mention} est déjà dans les cibles.", ephemeral=True)
-                return
-
-            await pool.execute(
-                "INSERT INTO gif_spam_targets (guild_id, user_id, added_by) VALUES ($1, $2, $3)",
-                str(self.guild_id), str(uid), str(interaction.user.id)
-            )
-            await log_to_db('info', f'{interaction.user} added {member} to GIF spam targets in {interaction.guild.name}')
-
-        embed = await build_gif_targets_embed(self.guild_id, interaction.guild)
-        view = GifSpamTargetsView(self.guild_id, self.owner_id, self.protections_data, self.page)
-        await interaction.response.edit_message(embed=embed, view=view)
-
-
-class GifSpamRemoveSelect(discord.ui.View):
-    def __init__(self, guild_id, owner_id, protections_data, page, options, guild):
-        super().__init__(timeout=60)
-        self.guild_id = guild_id
-        self.owner_id = owner_id
-        self.protections_data = protections_data
-        self.page = page
-        self.guild = guild
-        self.select = discord.ui.Select(placeholder="Choisir une cible à retirer...", options=options)
-        self.select.callback = self.select_callback
-        self.add_item(self.select)
-
-    async def interaction_check(self, interaction: discord.Interaction):
-        is_allowed = await is_owner_or_ownerlist(interaction.guild, interaction.user.id)
-        if not is_allowed:
-            await interaction.response.send_message("Vous n'êtes pas autorisé.", ephemeral=True)
-            return False
-        return True
-
-    async def select_callback(self, interaction: discord.Interaction):
-        uid = self.select.values[0]
-        if pool:
-            await pool.execute(
-                "DELETE FROM gif_spam_targets WHERE guild_id = $1 AND user_id = $2",
-                str(self.guild_id), uid
-            )
-            await log_to_db('info', f'{interaction.user} removed <@{uid}> from GIF spam targets in {interaction.guild.name}')
-
-        embed = await build_gif_targets_embed(self.guild_id, interaction.guild)
-        view = GifSpamTargetsView(self.guild_id, self.owner_id, self.protections_data, self.page)
-        await interaction.response.edit_message(embed=embed, view=view)
-
-
-async def build_mention_targets_embed(guild_id, guild):
-    lines = []
-    if pool:
-        rows = await pool.fetch(
-            "SELECT user_id FROM mention_spam_targets WHERE guild_id = $1 ORDER BY added_at DESC",
-            str(guild_id)
-        )
-        if rows:
-            for i, row in enumerate(rows, 1):
-                uid = row['user_id']
-                member = guild.get_member(int(uid))
-                if member:
-                    lines.append(f"`{i}.` {member.mention} (`{uid}`)")
-                else:
-                    lines.append(f"`{i}.` Utilisateur inconnu (`{uid}`)")
-        else:
-            lines.append("Aucune cible configurée.")
-    else:
-        lines.append("Base de données indisponible.")
-
-    embed = discord.Embed(
-        title="🎯 Cibles — Spam de mentions",
-        description="\n".join(lines),
-        color=0x2b2d31
-    )
-    embed.set_footer(text="3+ mentions en 8 secondes = punition")
-    return embed
-
-
-class MentionSpamTargetsView(discord.ui.View):
-    def __init__(self, guild_id, owner_id, protections_data, page):
-        super().__init__(timeout=180)
-        self.guild_id = guild_id
-        self.owner_id = owner_id
-        self.protections_data = protections_data
-        self.page = page
-        self._build_items()
-
-    def _build_items(self):
-        self.clear_items()
-        prot = self.protections_data.get("anti_mention_spam")
-        current_punishment = prot['punishment'] if prot and prot['punishment'] else 'ban'
-
-        punishment_options = []
-        for p in PUNISHMENT_OPTIONS:
-            punishment_options.append(discord.SelectOption(
-                label=p['label'],
-                value=p['value'],
-                default=(p['value'] == current_punishment)
-            ))
-        punishment_select = discord.ui.Select(
-            placeholder="Punition...",
-            options=punishment_options,
-            custom_id="mention_punishment",
-            row=0
-        )
-        punishment_select.callback = self.punishment_callback
-        self.add_item(punishment_select)
-
-        if current_punishment == 'timeout':
-            current_timeout = prot.get('timeout_duration', '1h') if prot else '1h'
-            timeout_options = []
-            for td in TIMEOUT_DURATION_OPTIONS:
-                timeout_options.append(discord.SelectOption(
-                    label=td['label'],
-                    value=td['value'],
-                    default=(td['value'] == current_timeout)
-                ))
-            timeout_select = discord.ui.Select(
-                placeholder="Durée de l'exclusion...",
-                options=timeout_options,
-                custom_id="mention_timeout_dur",
-                row=1
-            )
-            timeout_select.callback = self.timeout_duration_callback
-            self.add_item(timeout_select)
-
-        add_btn = discord.ui.Button(label="Ajouter une cible", style=discord.ButtonStyle.green, emoji="➕", custom_id="mention_add", row=2)
-        add_btn.callback = self.add_target
-        self.add_item(add_btn)
-
-        remove_btn = discord.ui.Button(label="Retirer une cible", style=discord.ButtonStyle.red, emoji="➖", custom_id="mention_remove", row=2)
-        remove_btn.callback = self.remove_target
-        self.add_item(remove_btn)
-
-        back_btn = discord.ui.Button(label="Retour", style=discord.ButtonStyle.danger, emoji="↩️", custom_id="mention_back", row=3)
-        back_btn.callback = self.back
-        self.add_item(back_btn)
-
-    async def interaction_check(self, interaction: discord.Interaction):
-        is_allowed = await is_owner_or_ownerlist(interaction.guild, interaction.user.id)
-        if not is_allowed:
-            await interaction.response.send_message("Vous n'êtes pas autorisé.", ephemeral=True)
-            return False
-        return True
-
-    async def punishment_callback(self, interaction: discord.Interaction):
-        value = interaction.data['values'][0]
-        await set_protection(self.guild_id, "anti_mention_spam", punishment=value)
-        if "anti_mention_spam" not in self.protections_data or not self.protections_data["anti_mention_spam"]:
-            self.protections_data["anti_mention_spam"] = {'enabled': False, 'log_channel_id': None, 'punishment': value, 'timeout_duration': '1h'}
-        else:
-            self.protections_data["anti_mention_spam"]['punishment'] = value
-        self._build_items()
-        embed = await build_mention_targets_embed(self.guild_id, interaction.guild)
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    async def timeout_duration_callback(self, interaction: discord.Interaction):
-        value = interaction.data['values'][0]
-        await set_protection(self.guild_id, "anti_mention_spam", timeout_duration=value)
-        if self.protections_data.get("anti_mention_spam"):
-            self.protections_data["anti_mention_spam"]['timeout_duration'] = value
-        self._build_items()
-        embed = await build_mention_targets_embed(self.guild_id, interaction.guild)
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    async def add_target(self, interaction: discord.Interaction):
-        modal = MentionSpamAddTargetModal(self.guild_id, self.owner_id, self.protections_data, self.page)
-        await interaction.response.send_modal(modal)
-
-    async def remove_target(self, interaction: discord.Interaction):
-        if not pool:
-            await interaction.response.send_message("Base de données indisponible.", ephemeral=True)
-            return
-        rows = await pool.fetch(
-            "SELECT user_id FROM mention_spam_targets WHERE guild_id = $1 ORDER BY added_at DESC",
-            str(self.guild_id)
-        )
-        if not rows:
-            await interaction.response.send_message("Aucune cible à retirer.", ephemeral=True)
-            return
-        options = []
-        for row in rows[:25]:
-            uid = row['user_id']
-            member = interaction.guild.get_member(int(uid))
-            label = str(member) if member else f"ID: {uid}"
-            options.append(discord.SelectOption(label=label, value=uid))
-        view = MentionSpamRemoveSelect(self.guild_id, self.owner_id, self.protections_data, self.page, options, interaction.guild)
-        await interaction.response.edit_message(view=view)
-
-    async def back(self, interaction: discord.Interaction):
-        mod = next((m for m in PROTECTION_MODULES if m['key'] == "anti_mention_spam"), None)
-        prot = self.protections_data.get("anti_mention_spam")
-        embed = build_protection_detail_embed(mod, prot, interaction.guild)
-        detail_view = ProtectionDetailView(self.guild_id, self.owner_id, "anti_mention_spam", self.protections_data, self.page)
-        await interaction.response.edit_message(embed=embed, view=detail_view)
-
-
-class MentionSpamAddTargetModal(discord.ui.Modal, title="Ajouter une cible mentions"):
-    user_id_input = discord.ui.TextInput(
-        label="ID de l'utilisateur",
-        placeholder="Ex: 123456789012345678",
-        required=True,
-        min_length=17,
-        max_length=20
-    )
-
-    def __init__(self, guild_id, owner_id, protections_data, page):
-        super().__init__()
-        self.guild_id = guild_id
-        self.owner_id = owner_id
-        self.protections_data = protections_data
-        self.page = page
-
-    async def on_submit(self, interaction: discord.Interaction):
-        user_id_str = self.user_id_input.value.strip()
-        try:
-            uid = int(user_id_str)
-        except ValueError:
-            await interaction.response.send_message("ID invalide. Entrez un ID numérique.", ephemeral=True)
-            return
-
-        member = interaction.guild.get_member(uid)
-        if not member:
-            try:
-                member = await interaction.guild.fetch_member(uid)
-            except discord.NotFound:
-                await interaction.response.send_message("Membre introuvable sur ce serveur.", ephemeral=True)
-                return
-
-        if pool:
-            existing = await pool.fetchrow(
-                "SELECT id FROM mention_spam_targets WHERE guild_id = $1 AND user_id = $2",
-                str(self.guild_id), str(uid)
-            )
-            if existing:
-                await interaction.response.send_message(f"{member.mention} est déjà dans les cibles.", ephemeral=True)
-                return
-
-            await pool.execute(
-                "INSERT INTO mention_spam_targets (guild_id, user_id, added_by) VALUES ($1, $2, $3)",
-                str(self.guild_id), str(uid), str(interaction.user.id)
-            )
-            await log_to_db('info', f'{interaction.user} added {member} to mention spam targets in {interaction.guild.name}')
-
-        embed = await build_mention_targets_embed(self.guild_id, interaction.guild)
-        view = MentionSpamTargetsView(self.guild_id, self.owner_id, self.protections_data, self.page)
-        await interaction.response.edit_message(embed=embed, view=view)
-
-
-class MentionSpamRemoveSelect(discord.ui.View):
-    def __init__(self, guild_id, owner_id, protections_data, page, options, guild):
-        super().__init__(timeout=60)
-        self.guild_id = guild_id
-        self.owner_id = owner_id
-        self.protections_data = protections_data
-        self.page = page
-        self.guild = guild
-        self.select = discord.ui.Select(placeholder="Choisir une cible à retirer...", options=options)
-        self.select.callback = self.select_callback
-        self.add_item(self.select)
-
-    async def interaction_check(self, interaction: discord.Interaction):
-        is_allowed = await is_owner_or_ownerlist(interaction.guild, interaction.user.id)
-        if not is_allowed:
-            await interaction.response.send_message("Vous n'êtes pas autorisé.", ephemeral=True)
-            return False
-        return True
-
-    async def select_callback(self, interaction: discord.Interaction):
-        uid = self.select.values[0]
-        if pool:
-            await pool.execute(
-                "DELETE FROM mention_spam_targets WHERE guild_id = $1 AND user_id = $2",
-                str(self.guild_id), uid
-            )
-            await log_to_db('info', f'{interaction.user} removed <@{uid}> from mention spam targets in {interaction.guild.name}')
-
-        embed = await build_mention_targets_embed(self.guild_id, interaction.guild)
-        view = MentionSpamTargetsView(self.guild_id, self.owner_id, self.protections_data, self.page)
-        await interaction.response.edit_message(embed=embed, view=view)
-
-
-class LogChannelModal(discord.ui.Modal, title="Configurer le salon de logs"):
-    channel_id_input = discord.ui.TextInput(
-        label="ID du salon de logs",
-        placeholder="Ex: 1245008221731557478 (vide pour retirer)",
-        required=False,
-        max_length=20
-    )
-
-    def __init__(self, guild_id, owner_id, protection_key, protections_data, page):
-        super().__init__()
-        self.guild_id = guild_id
-        self.owner_id = owner_id
-        self.protection_key = protection_key
-        self.protections_data = protections_data
-        self.page = page
-
-    async def on_submit(self, interaction: discord.Interaction):
-        channel_id_str = self.channel_id_input.value.strip()
-        if channel_id_str:
-            try:
-                cid = int(channel_id_str)
-                channel = interaction.guild.get_channel(cid)
-                if not channel:
-                    await interaction.response.send_message("Salon introuvable sur ce serveur.", ephemeral=True)
-                    return
-            except ValueError:
-                await interaction.response.send_message("ID invalide.", ephemeral=True)
-                return
-            await set_protection(self.guild_id, self.protection_key, log_channel_id=channel_id_str)
-            if self.protection_key not in self.protections_data or not self.protections_data[self.protection_key]:
-                self.protections_data[self.protection_key] = {'enabled': False, 'log_channel_id': channel_id_str, 'punishment': 'ban'}
-            else:
-                self.protections_data[self.protection_key]['log_channel_id'] = channel_id_str
-        else:
-            await set_protection(self.guild_id, self.protection_key, log_channel_id="")
-            if self.protections_data.get(self.protection_key):
-                self.protections_data[self.protection_key]['log_channel_id'] = None
-
-        mod = next((m for m in PROTECTION_MODULES if m['key'] == self.protection_key), None)
-        embed = build_protection_detail_embed(mod, self.protections_data.get(self.protection_key), interaction.guild)
-        detail_view = ProtectionDetailView(self.guild_id, self.owner_id, self.protection_key, self.protections_data, self.page)
-        await interaction.response.edit_message(embed=embed, view=detail_view)
-        await log_to_db('info', f'{interaction.user} configured log channel for {mod["label"]} in {interaction.guild.name}')
-
-
-async def load_all_protections(guild_id):
-    data = {}
-    if pool:
-        rows = await pool.fetch(
-            "SELECT * FROM guild_protections WHERE guild_id = $1",
-            str(guild_id)
-        )
-        for row in rows:
-            data[row['protection_key']] = {
-                'enabled': row['enabled'],
-                'log_channel_id': row['log_channel_id'],
-                'punishment': row['punishment'],
-                'timeout_duration': row.get('timeout_duration', '1h'),
-                'whitelist_bypass': row.get('whitelist_bypass', False)
-            }
-    return data
-
-
-@bot.tree.command(name="panel", description="Gérer les modules de protection du serveur.")
-@app_commands.default_permissions(administrator=True)
-async def panel_command(interaction: discord.Interaction):
-    try:
-        is_allowed = await is_owner_or_ownerlist(interaction.guild, interaction.user.id)
-        if not is_allowed:
-            await interaction.response.send_message("Vous n'êtes pas autorisé à utiliser cette commande.", ephemeral=True)
-            return
-
-        protections_data = await load_all_protections(interaction.guild.id)
-        total_pages = (len(PROTECTION_MODULES) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
-        embed = build_panel_page_embed(protections_data, 0, total_pages)
-        view = PanelView(interaction.guild.id, interaction.user.id, protections_data, 0)
-        await interaction.response.send_message(embed=embed, view=view)
-        await log_to_db('info', f'/panel used by {interaction.user} in #{interaction.channel}')
-    except Exception as e:
-        logger.error(f"Error in /panel command: {traceback.format_exc()}")
-        try:
-            await log_to_db('error', f'Error in /panel: {e}')
-        except Exception:
-            pass
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.send_message("Une erreur est survenue.", ephemeral=True)
-        except Exception:
-            pass
-
-
-@bot.tree.command(name="logs", description="Créer le salon logs・général pour tous les événements du serveur.")
+@bot.tree.command(name="logsadmin", description="Créer le salon de logs des tickets Admin.")
 @app_commands.default_permissions(administrator=True)
 async def logs_command(interaction: discord.Interaction):
     try:
@@ -3780,49 +2431,45 @@ async def logs_command(interaction: discord.Interaction):
 
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, embed_links=True),
         }
-        for role in guild.roles:
-            if role.permissions.administrator and role != guild.default_role:
+        for role_id in (ROLE_DIRECTION, ROLE_GERANCE, ROLE_ADMIN):
+            role = guild.get_role(role_id)
+            if role:
                 overwrites[role] = discord.PermissionOverwrite(view_channel=True, read_message_history=True, send_messages=False)
 
-        category = discord.utils.get(guild.categories, name="RShield - Logs")
+        category = discord.utils.get(guild.categories, name=TICKET_LOG_CATEGORY)
         if not category:
-            category = await guild.create_category("RShield - Logs", overwrites=overwrites)
+            category = await guild.create_category(TICKET_LOG_CATEGORY, overwrites=overwrites)
+        else:
             try:
-                await category.edit(position=len(guild.categories))
+                await category.edit(overwrites=overwrites)
             except Exception:
                 pass
-        else:
-            await category.edit(overwrites=overwrites)
 
-        existing = discord.utils.get(category.text_channels, name=GENERAL_LOG_CHANNEL)
+        existing = discord.utils.get(category.text_channels, name=TICKET_LOG_CHANNEL)
         if not existing:
             log_ch = await guild.create_text_channel(
-                GENERAL_LOG_CHANNEL,
+                TICKET_LOG_CHANNEL,
                 category=category,
                 overwrites=overwrites,
-                topic="Tous les événements du serveur — géré par NexusBot Shield"
+                topic="Logs des tickets Admin RP — MssClick"
             )
         else:
             log_ch = existing
-
-        ALL_PROTECTION_KEYS = [m['key'] for m in PROTECTION_MODULES]
-        for key in ALL_PROTECTION_KEYS:
-            await set_protection(str(guild.id), key, log_channel_id=str(log_ch.id))
+            try:
+                await log_ch.edit(overwrites=overwrites)
+            except Exception:
+                pass
 
         embed = discord.Embed(
-            title="✅ Logs configurés",
+            title="✅ Logs Tickets Admin configurés",
             description=(
                 f"Le salon {log_ch.mention} a été créé/configuré.\n\n"
-                f"Tous les événements du serveur y seront enregistrés :\n"
-                f"> 👤 Membres (join, leave, ban, kick, timeout…)\n"
-                f"> 🎭 Rôles (créations, modifications, suppressions)\n"
-                f"> 📝 Messages (suppressions, éditions)\n"
-                f"> 🔊 Vocal (connexions, déplacements, mutes)\n"
-                f"> ⚙️ Serveur (paramètres, webhooks, bots)\n"
-                f"> 📁 Salons & threads\n"
-                f"> 🎉 Invitations & emojis"
+                "Les événements suivants y seront enregistrés :\n"
+                "> 🟢 Ouverture d'un ticket (type, créateur)\n"
+                "> 🟡 Prise en charge (par qui, quand)\n"
+                "> 🔴 Fermeture du ticket (par qui)"
             ),
             color=0x2b2d31
         )
@@ -4762,6 +3409,11 @@ async def handle_admin_ticket_creation(interaction: discord.Interaction, ticket_
             ephemeral=True
         )
         await log_to_db('info', f'Admin ticket #{ticket_id} ({ticket_info["label"]}) opened by {user} in {guild.name}')
+        await log_ticket_event(
+            guild, "open", ticket_id, ticket_type_key,
+            creator_id=str(user.id), channel=channel,
+            opened_at=datetime.datetime.utcnow()
+        )
     except Exception as e:
         logger.error(f"Error in handle_admin_ticket_creation: {traceback.format_exc()}")
         try:
@@ -4868,6 +3520,12 @@ async def handle_admin_claim(interaction: discord.Interaction, ticket_id: int):
         await channel.send(content=ping_content, embed=claim_embed)
         await interaction.followup.send("✅ Ticket pris en charge.", ephemeral=True)
         await log_to_db('info', f'Admin ticket #{ticket_id} claimed by {member} in {guild.name}')
+        await log_ticket_event(
+            guild, "claim", ticket_id, ticket['ticket_type'],
+            creator_id=creator_id, channel=channel,
+            claimer_id=str(member.id),
+            claimed_at=datetime.datetime.utcnow()
+        )
     except Exception as e:
         logger.error(f"Error in handle_admin_claim: {traceback.format_exc()}")
         try:
@@ -4937,6 +3595,21 @@ async def handle_close_admin_ticket(interaction: discord.Interaction, ticket_id:
             pass
 
         await log_to_db('info', f'Admin ticket #{ticket_id} closed by {member}')
+        try:
+            _claimer_id = ticket['claimer_id']
+        except Exception:
+            _claimer_id = None
+        try:
+            _claimed_at = ticket['claimed_at']
+        except Exception:
+            _claimed_at = None
+        await log_ticket_event(
+            guild, "close", ticket_id, ticket['ticket_type'],
+            creator_id=ticket['user_id'], channel=channel,
+            claimer_id=_claimer_id,
+            closer=member,
+            claimed_at=_claimed_at
+        )
 
         await asyncio.sleep(5)
         try:
