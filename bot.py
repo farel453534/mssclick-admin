@@ -3496,7 +3496,7 @@ async def handle_admin_claim(interaction: discord.Interaction, ticket_id: int):
         creator_id = ticket['user_id']
 
         creator_short = make_short_name(member)
-        new_name = f"{ticket_info.get('short', 'ticket')}-{creator_short}-claimed"
+        new_name = f"{ticket_info.get('circle', '')}{ticket_info.get('short', 'ticket')}-{creator_short}-claimed"
         try:
             await channel.edit(name=new_name, reason=f"Admin ticket #{ticket_id} pris en charge par {member}")
         except Exception:
