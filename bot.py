@@ -162,7 +162,8 @@ SLASH_COMMANDS = [
     {"name": "/help", "params": "", "description": "Afficher la liste des commandes du bot."},
     {"name": "/panel", "params": "", "description": "Gérer les modules du serveur."},
     {"name": "/logs", "params": "", "description": "Créer automatiquement les salons de logs pour tous les modules."},
-    {"name": "/ticket", "params": "", "description": "Envoyer le panneau d'ouverture de tickets."},
+    {"name": "/ticketadmin", "params": "", "description": "Envoyer le panneau d'ouverture de tickets (ancien système)."},
+    {"name": "/ticket", "params": "", "description": "Envoyer le panneau de tickets Admin RP."},
     {"name": "/blacklist", "params": "", "description": "Gérer la liste noire globale du bot."},
     {"name": "/unblacklist", "params": "", "description": "Retirer un utilisateur de la blacklist."},
     {"name": "/whitelist", "params": "", "description": "Gérer la liste blanche du serveur."},
@@ -299,6 +300,13 @@ class NexusBot(discord.Client):
             logger.info("Registered persistent ticket views.")
         except Exception as e:
             logger.error(f"Failed to register ticket views: {e}")
+
+        try:
+            self.add_view(AdminTicketPanelView())
+            self.add_dynamic_items(ClaimAdminTicketButton, CloseAdminTicketButton)
+            logger.info("Registered persistent admin ticket views.")
+        except Exception as e:
+            logger.error(f"Failed to register admin ticket views: {e}")
 
         if not self.synced:
             for guild in self.guilds:
@@ -4499,19 +4507,457 @@ async def create_ticket_channel(guild, creator, ticket_info, config, ticket_id, 
     return channel
 
 
-@bot.tree.command(name="ticket", description="Envoyer le panneau d'ouverture de tickets dans ce salon.")
-@app_commands.default_permissions(administrator=True)
-async def ticket_command(interaction: discord.Interaction):
+ADMIN_TICKET_TYPES = {
+    "trahison": {"label": "Ticket Trahison", "short": "trh", "emoji": "⚔️"},
+    "desertion": {"label": "Ticket Desertion", "short": "des", "emoji": "🏃"},
+    "naissance": {"label": "Ticket Naissance", "short": "nai", "emoji": "👶"},
+    "coup_etat": {"label": "Ticket Coup d'Etat", "short": "coup", "emoji": "👑"},
+    "vol": {"label": "Ticket Vol", "short": "vol", "emoji": "💰"},
+    "rpk_joueur": {"label": "Ticket RPK vers un joueur", "short": "rpk", "emoji": "🎯"},
+    "void": {"label": "Ticket VOID", "short": "void", "emoji": "🌀"},
+}
+
+ADMIN_TICKET_ORDER = ["trahison", "desertion", "naissance", "coup_etat", "vol", "rpk_joueur", "void"]
+
+ADMIN_CATEGORY_ID = 1500215169999966248
+
+ADMIN_TICKET_VIEW_ROLES = [1500215064177934507, 1500213826107343039, 1500214818936848534]
+
+ADMIN_TICKET_PING_ROLES = [1500214818936848534, 1500213826107343039]
+
+
+class AdminTicketSelect(discord.ui.Select):
+    def __init__(self):
+        options = []
+        for k in ADMIN_TICKET_ORDER:
+            t = ADMIN_TICKET_TYPES[k]
+            options.append(discord.SelectOption(
+                label=t["label"][:100],
+                value=k,
+                emoji=t.get("emoji"),
+            ))
+        super().__init__(
+            placeholder="Sélectionnez votre raison...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="admin_ticket_panel_select",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await handle_admin_ticket_creation(interaction, self.values[0])
+
+
+class AdminTicketPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(AdminTicketSelect())
+
+
+class TicketAdminLayout(discord.ui.LayoutView):
+    def __init__(self):
+        super().__init__(timeout=None)
+        container = discord.ui.Container(accent_colour=0xE00000)
+
+        try:
+            gallery = discord.ui.MediaGallery()
+            gallery.add_item(media="https://i.imgur.com/HaVxSDm.png")
+            container.add_item(gallery)
+        except Exception:
+            pass
+
+        container.add_item(discord.ui.TextDisplay(
+            "## 🔧  OUVRIR UN TICKET VIA LE BOT ADMIN"
+        ))
+        container.add_item(discord.ui.Separator())
+        container.add_item(discord.ui.TextDisplay(
+            "### COMMENT ÇA MARCHE ?\n"
+            "**1** Sélectionnez la **raison** de votre ticket dans le menu.\n"
+            "**2** Le bot créera un ticket pour vous qui attendra d'être prit en charge.\n"
+            "**3** Expliquez votre demande en attendant.\n"
+            "**4** Patientez jusqu'à l'arrivée d'un membre de l'Administration."
+        ))
+        container.add_item(discord.ui.Separator())
+        container.add_item(discord.ui.TextDisplay(
+            "### PRÉVENTION\n"
+            "» Les autorisations peuvent prendre du temps à venir, le temps que l'administration étudie votre demande, sa cohérence, votre rp et d'autres paramètres importants."
+        ))
+        container.add_item(discord.ui.Separator())
+
+        action_row = discord.ui.ActionRow()
+        action_row.add_item(AdminTicketSelect())
+        container.add_item(action_row)
+
+        container.add_item(discord.ui.Separator())
+        container.add_item(discord.ui.TextDisplay(
+            "-# MssClick • Poudlard | Tickets Admin"
+        ))
+
+        self.add_item(container)
+
+
+class ClaimAdminTicketButton(discord.ui.DynamicItem[discord.ui.Button], template=r'claim_admin:(?P<id>\d+)'):
+    def __init__(self, ticket_id: int):
+        self.ticket_id = ticket_id
+        super().__init__(
+            discord.ui.Button(
+                label='Claim',
+                emoji='🎫',
+                style=discord.ButtonStyle.green,
+                custom_id=f'claim_admin:{ticket_id}',
+            )
+        )
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(int(match['id']))
+
+    async def callback(self, interaction: discord.Interaction):
+        await handle_admin_claim(interaction, self.ticket_id)
+
+
+class CloseAdminTicketButton(discord.ui.DynamicItem[discord.ui.Button], template=r'close_admin:(?P<id>\d+)'):
+    def __init__(self, ticket_id: int):
+        self.ticket_id = ticket_id
+        super().__init__(
+            discord.ui.Button(
+                label='Fermer le ticket',
+                emoji='🔒',
+                style=discord.ButtonStyle.danger,
+                custom_id=f'close_admin:{ticket_id}',
+            )
+        )
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(int(match['id']))
+
+    async def callback(self, interaction: discord.Interaction):
+        await handle_close_admin_ticket(interaction, self.ticket_id)
+
+
+async def handle_admin_ticket_creation(interaction: discord.Interaction, ticket_type_key: str):
     try:
-        view = TicketPanelLayout()
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        user = interaction.user
+
+        if not guild:
+            await interaction.followup.send("❌ Cette commande doit être utilisée sur un serveur.", ephemeral=True)
+            return
+
+        ticket_info = ADMIN_TICKET_TYPES.get(ticket_type_key)
+        if not ticket_info:
+            await interaction.followup.send("❌ Type de ticket inconnu.", ephemeral=True)
+            return
+
+        if not pool:
+            await interaction.followup.send("❌ Base de données indisponible.", ephemeral=True)
+            return
+
+        existing = await pool.fetchrow(
+            "SELECT id, status, channel_id FROM tickets WHERE guild_id = $1 AND user_id = $2 AND ticket_type = $3 AND status IN ('pending', 'open')",
+            str(guild.id), str(user.id), ticket_type_key
+        )
+        if existing:
+            ch_id = existing['channel_id']
+            if ch_id:
+                channel = guild.get_channel(int(ch_id))
+                if channel:
+                    await interaction.followup.send(
+                        f"❌ Vous avez déjà un ticket de ce type ouvert : {channel.mention}",
+                        ephemeral=True
+                    )
+                    return
+
+        ticket_id = await pool.fetchval(
+            "INSERT INTO tickets (guild_id, user_id, ticket_type, status) VALUES ($1, $2, $3, 'open') RETURNING id",
+            str(guild.id), str(user.id), ticket_type_key
+        )
+
+        category = guild.get_channel(ADMIN_CATEGORY_ID)
+        if not category or not isinstance(category, discord.CategoryChannel):
+            await interaction.followup.send("❌ Catégorie de tickets introuvable. Contactez un administrateur.", ephemeral=True)
+            return
+
+        creator_short = make_short_name(user)
+        channel_name = f"{ticket_info['short']}-{creator_short}"
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            guild.me: discord.PermissionOverwrite(
+                view_channel=True, send_messages=True,
+                read_message_history=True, manage_channels=True, manage_messages=True
+            ),
+            user: discord.PermissionOverwrite(
+                view_channel=True, send_messages=True,
+                read_message_history=True, attach_files=True, embed_links=True
+            ),
+        }
+        for role_id in ADMIN_TICKET_VIEW_ROLES:
+            role = guild.get_role(role_id)
+            if role:
+                overwrites[role] = discord.PermissionOverwrite(
+                    view_channel=True, send_messages=True,
+                    read_message_history=True, attach_files=True, embed_links=True
+                )
+
+        try:
+            channel = await guild.create_text_channel(
+                name=channel_name,
+                category=category,
+                overwrites=overwrites,
+                topic=f"Ticket #{ticket_id} — {ticket_info['label']} — Ouvert par {user}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to create admin ticket channel: {e}")
+            await interaction.followup.send("❌ Impossible de créer le salon ticket.", ephemeral=True)
+            return
+
+        await pool.execute(
+            "UPDATE tickets SET channel_id = $1 WHERE id = $2",
+            str(channel.id), ticket_id
+        )
+
+        welcome_embed = discord.Embed(
+            title=f"{ticket_info['emoji']} {ticket_info['label']}",
+            description=(
+                f"**Ouvert par :** {user.mention}\n"
+                f"**ID Ticket :** `{ticket_id}`\n\n"
+                "Veuillez décrire votre demande en détail.\n"
+                "Un membre du staff prendra en charge votre ticket dans les plus brefs délais."
+            ),
+            color=0x2b2d31,
+            timestamp=datetime.datetime.utcnow()
+        )
+        try:
+            welcome_embed.set_thumbnail(url=user.display_avatar.url)
+        except Exception:
+            pass
+
+        view = discord.ui.View(timeout=None)
+        view.add_item(ClaimAdminTicketButton(ticket_id))
+        view.add_item(CloseAdminTicketButton(ticket_id))
+
+        await channel.send(content=user.mention, embed=welcome_embed, view=view)
+
+        await interaction.followup.send(
+            f"✅ Votre ticket **{ticket_info['label']}** a été ouvert : {channel.mention}",
+            ephemeral=True
+        )
+        await log_to_db('info', f'Admin ticket #{ticket_id} ({ticket_info["label"]}) opened by {user} in {guild.name}')
+    except Exception as e:
+        logger.error(f"Error in handle_admin_ticket_creation: {traceback.format_exc()}")
+        try:
+            await log_to_db('error', f'Error in handle_admin_ticket_creation: {e}')
+        except Exception:
+            pass
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send("❌ Une erreur est survenue.", ephemeral=True)
+            else:
+                await interaction.response.send_message("❌ Une erreur est survenue.", ephemeral=True)
+        except Exception:
+            pass
+
+
+async def handle_admin_claim(interaction: discord.Interaction, ticket_id: int):
+    try:
+        await interaction.response.defer(ephemeral=True)
+        if not pool:
+            await interaction.followup.send("❌ Base de données indisponible.", ephemeral=True)
+            return
+
+        ticket = await pool.fetchrow("SELECT * FROM tickets WHERE id = $1", ticket_id)
+        if not ticket:
+            await interaction.followup.send("❌ Ticket introuvable.", ephemeral=True)
+            return
+
+        if ticket['status'] == 'closed':
+            await interaction.followup.send("❌ Ce ticket est fermé.", ephemeral=True)
+            return
+
+        if ticket['claimer_id']:
+            await interaction.followup.send(
+                f"❌ Ce ticket a déjà été pris en charge par <@{ticket['claimer_id']}>.",
+                ephemeral=True
+            )
+            return
+
+        guild = interaction.guild
+        if not guild:
+            await interaction.followup.send("❌ Serveur introuvable.", ephemeral=True)
+            return
+
+        member = interaction.user
+        allowed_role_ids = set(ADMIN_TICKET_VIEW_ROLES)
+        member_role_ids = {r.id for r in getattr(member, 'roles', [])}
+        if not (allowed_role_ids & member_role_ids):
+            await interaction.followup.send(
+                "❌ Vous n'avez pas le rôle requis pour prendre ce ticket en charge.",
+                ephemeral=True
+            )
+            return
+
+        claimed_row = await pool.fetchrow(
+            """
+            UPDATE tickets
+               SET status = 'open',
+                   claimer_id = $1,
+                   claimed_at = NOW()
+             WHERE id = $2
+               AND claimer_id IS NULL
+               AND status != 'closed'
+            RETURNING id
+            """,
+            str(member.id), ticket_id
+        )
+        if not claimed_row:
+            current = await pool.fetchrow("SELECT status, claimer_id FROM tickets WHERE id = $1", ticket_id)
+            if current and current['claimer_id']:
+                await interaction.followup.send(
+                    f"❌ Ce ticket vient d'être pris en charge par <@{current['claimer_id']}>.",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send("❌ Ce ticket n'est plus disponible.", ephemeral=True)
+            return
+
+        channel = interaction.channel
+        ticket_info = ADMIN_TICKET_TYPES.get(ticket['ticket_type'], {})
+        creator_id = ticket['user_id']
+
+        creator_short = make_short_name(member)
+        new_name = f"{ticket_info.get('short', 'ticket')}-{creator_short}-claimed"
+        try:
+            await channel.edit(name=new_name, reason=f"Admin ticket #{ticket_id} pris en charge par {member}")
+        except Exception:
+            pass
+
+        ping_parts = [f"<@{creator_id}>"]
+        for role_id in ADMIN_TICKET_PING_ROLES:
+            ping_parts.append(f"<@&{role_id}>")
+        ping_content = " ".join(ping_parts)
+
+        claim_embed = discord.Embed(
+            description=f"✅ Ticket pris en charge par {member.mention}.",
+            color=0x2ecc71,
+            timestamp=datetime.datetime.utcnow()
+        )
+
+        try:
+            close_only_view = discord.ui.View(timeout=None)
+            close_only_view.add_item(CloseAdminTicketButton(ticket_id))
+            await interaction.message.edit(view=close_only_view)
+        except Exception:
+            pass
+
+        await channel.send(content=ping_content, embed=claim_embed)
+        await interaction.followup.send("✅ Ticket pris en charge.", ephemeral=True)
+        await log_to_db('info', f'Admin ticket #{ticket_id} claimed by {member} in {guild.name}')
+    except Exception as e:
+        logger.error(f"Error in handle_admin_claim: {traceback.format_exc()}")
+        try:
+            await log_to_db('error', f'Error in handle_admin_claim: {e}')
+        except Exception:
+            pass
+        try:
+            await interaction.followup.send("❌ Une erreur est survenue.", ephemeral=True)
+        except Exception:
+            pass
+
+
+async def handle_close_admin_ticket(interaction: discord.Interaction, ticket_id: int):
+    try:
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        member = interaction.user
+
+        if not guild or not pool:
+            await interaction.followup.send("❌ Erreur de configuration.", ephemeral=True)
+            return
+
+        ticket = await pool.fetchrow("SELECT * FROM tickets WHERE id = $1", ticket_id)
+        if not ticket:
+            await interaction.followup.send("❌ Ticket introuvable.", ephemeral=True)
+            return
+
+        allowed_role_ids = set(ADMIN_TICKET_VIEW_ROLES)
+        member_role_ids = {r.id for r in getattr(member, 'roles', [])}
+        is_creator = str(member.id) == ticket['user_id']
+        has_role = bool(allowed_role_ids & member_role_ids)
+
+        if not is_creator and not has_role:
+            await interaction.followup.send(
+                "❌ Vous n'avez pas la permission de fermer ce ticket.",
+                ephemeral=True
+            )
+            return
+
+        if is_creator and not has_role:
+            await interaction.followup.send(
+                "❌ Vous ne pouvez pas fermer votre propre ticket. Demandez à un membre du staff.",
+                ephemeral=True
+            )
+            return
+
+        await pool.execute(
+            "UPDATE tickets SET status = 'closed' WHERE id = $1",
+            ticket_id
+        )
+
+        channel = interaction.channel
+        try:
+            close_embed = discord.Embed(
+                title="🔒 Ticket fermé",
+                description=f"Fermé par {member.mention}. Le salon sera supprimé dans 5 secondes.",
+                color=0xed4245,
+                timestamp=datetime.datetime.utcnow(),
+            )
+            await channel.send(embed=close_embed)
+        except Exception:
+            pass
+
+        try:
+            await interaction.followup.send("✅ Fermeture du ticket en cours...", ephemeral=True)
+        except Exception:
+            pass
+
+        await log_to_db('info', f'Admin ticket #{ticket_id} closed by {member}')
+
+        await asyncio.sleep(5)
+        try:
+            await channel.delete(reason=f"Admin ticket #{ticket_id} fermé par {member}")
+        except Exception as e:
+            logger.error(f"Failed to delete admin ticket channel #{ticket_id}: {e}")
+    except Exception as e:
+        logger.error(f"Error in handle_close_admin_ticket: {traceback.format_exc()}")
+        try:
+            await log_to_db('error', f'Error in handle_close_admin_ticket: {e}')
+        except Exception:
+            pass
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ Une erreur est survenue.", ephemeral=True)
+            else:
+                await interaction.followup.send("❌ Une erreur est survenue.", ephemeral=True)
+        except Exception:
+            pass
+
+
+@bot.tree.command(name="ticketadmin", description="Envoyer le panneau de tickets Admin RP dans ce salon.")
+@app_commands.default_permissions(administrator=True)
+async def ticketadmin_command(interaction: discord.Interaction):
+    try:
+        view = TicketAdminLayout()
         await interaction.channel.send(view=view)
 
-        await interaction.response.send_message("✅ Panneau de tickets envoyé.", ephemeral=True)
-        await log_to_db('info', f'/ticket panel sent by {interaction.user} in #{interaction.channel}')
+        await interaction.response.send_message("✅ Panneau de tickets Admin envoyé.", ephemeral=True)
+        await log_to_db('info', f'/ticketadmin panel sent by {interaction.user} in #{interaction.channel}')
     except Exception as e:
-        logger.error(f"Error in /ticket command: {traceback.format_exc()}")
+        logger.error(f"Error in /ticketadmin command: {traceback.format_exc()}")
         try:
-            await log_to_db('error', f'Error in /ticket: {e}')
+            await log_to_db('error', f'Error in /ticketadmin: {e}')
         except Exception:
             pass
         try:
