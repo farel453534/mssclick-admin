@@ -219,8 +219,7 @@ def build_help_embed(command_ids=None):
         else:
             text_lines.append(f"`{cmd['name']}` - {cmd['description']}")
 
-    description = "# NexusBot - Shield\n"
-    description += "NexusBot Shield est entièrement dédié à la protection du serveur Discord.\n\n"
+    description = "# MssClick - Admin\n"
     description += "## Commandes Slash\n"
     description += "\n".join(slash_lines) + "\n\n"
     description += "## Commandes Textuelles\n"
@@ -231,11 +230,7 @@ def build_help_embed(command_ids=None):
         color=0x2b2d31
     )
 
-    banner_url = os.environ.get("HELP_BANNER_URL", "")
-    if banner_url:
-        embed.set_image(url=banner_url)
-
-    embed.set_footer(text="© NexusBot Shield")
+    embed.set_footer(text="© MssClick - Admin")
 
     return embed
 
@@ -290,8 +285,10 @@ class NexusBot(discord.Client):
         logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
         await log_to_db('info', f'Bot logged in as {self.user}')
 
-        streaming_activity = discord.Streaming(name="MssClick Poudlard", url="https://twitch.tv/mssclick")
-        await self.change_presence(activity=streaming_activity)
+        await self.change_presence(
+            status=discord.Status.online,
+            activity=discord.Game(name="MssClick Admin")
+        )
 
         try:
             self.add_view(TicketPanelView())
@@ -3881,35 +3878,35 @@ ROLE_RESP_ANIM = 1500216707883597854
 CATEGORY_CONFIG = {
     "moderation": {
         "primary_role": 1500212869243998239,
-        "category_id": 1500213318491705455,
+        "category_id": 1500242373614112958,
         "extra_view_roles": [ROLE_ADMIN, ROLE_RESP_MOD, ROLE_GERANCE],
         "auto_create": False,
         "open_to_primary_role": False,
     },
     "animation": {
         "primary_role": 1500216204747608164,
-        "category_id": 1500216301535363172,
+        "category_id": 1500242373614112958,
         "extra_view_roles": [ROLE_ADMIN, ROLE_RESP_ANIM, ROLE_GERANCE],
         "auto_create": False,
         "open_to_primary_role": False,
     },
     "administration": {
         "primary_role": ROLE_ADMIN,
-        "category_id": 1500213926502338560,
+        "category_id": 1500242373614112958,
         "extra_view_roles": [ROLE_GERANCE],
         "auto_create": False,
         "open_to_primary_role": True,
     },
     "gerance": {
         "primary_role": ROLE_GERANCE,
-        "category_id": 1500213926502338560,
+        "category_id": 1500242373614112958,
         "extra_view_roles": [],
         "auto_create": False,
         "open_to_primary_role": False,
     },
     "direction": {
         "primary_role": 1500215064177934507,
-        "category_id": 1500215169999966248,
+        "category_id": 1500242373614112958,
         "extra_view_roles": [],
         "auto_create": True,
         "open_to_primary_role": False,
@@ -4519,11 +4516,27 @@ ADMIN_TICKET_TYPES = {
 
 ADMIN_TICKET_ORDER = ["trahison", "desertion", "naissance", "coup_etat", "vol", "rpk_joueur", "void"]
 
-ADMIN_CATEGORY_ID = 1500215169999966248
+ADMIN_CATEGORY_ID = 1500242373614112958
 
-ADMIN_TICKET_VIEW_ROLES = [1500215064177934507, 1500213826107343039, 1500214818936848534]
+ROLE_DIRECTION = 1500215064177934507
 
-ADMIN_TICKET_PING_ROLES = [1500214818936848534, 1500213826107343039]
+ADMIN_TICKET_VIEW_ROLES_DEFAULT = [ROLE_DIRECTION, ROLE_GERANCE]
+ADMIN_TICKET_VIEW_ROLES_VOID = [ROLE_DIRECTION, ROLE_GERANCE, ROLE_ADMIN]
+
+ADMIN_TICKET_PING_ROLES_DEFAULT = [ROLE_GERANCE]
+ADMIN_TICKET_PING_ROLES_VOID = [ROLE_GERANCE, ROLE_ADMIN]
+
+
+def get_admin_ticket_view_roles(ticket_type_key: str):
+    if ticket_type_key == "void":
+        return ADMIN_TICKET_VIEW_ROLES_VOID
+    return ADMIN_TICKET_VIEW_ROLES_DEFAULT
+
+
+def get_admin_ticket_ping_roles(ticket_type_key: str):
+    if ticket_type_key == "void":
+        return ADMIN_TICKET_PING_ROLES_VOID
+    return ADMIN_TICKET_PING_ROLES_DEFAULT
 
 
 class AdminTicketSelect(discord.ui.Select):
@@ -4694,7 +4707,7 @@ async def handle_admin_ticket_creation(interaction: discord.Interaction, ticket_
                 read_message_history=True, attach_files=True, embed_links=True
             ),
         }
-        for role_id in ADMIN_TICKET_VIEW_ROLES:
+        for role_id in get_admin_ticket_view_roles(ticket_type_key):
             role = guild.get_role(role_id)
             if role:
                 overwrites[role] = discord.PermissionOverwrite(
@@ -4739,7 +4752,10 @@ async def handle_admin_ticket_creation(interaction: discord.Interaction, ticket_
         view.add_item(ClaimAdminTicketButton(ticket_id))
         view.add_item(CloseAdminTicketButton(ticket_id))
 
-        await channel.send(content=user.mention, embed=welcome_embed, view=view)
+        ping_parts = [user.mention]
+        for role_id in get_admin_ticket_ping_roles(ticket_type_key):
+            ping_parts.append(f"<@&{role_id}>")
+        await channel.send(content=" ".join(ping_parts), embed=welcome_embed, view=view)
 
         await interaction.followup.send(
             f"✅ Votre ticket **{ticket_info['label']}** a été ouvert : {channel.mention}",
@@ -4790,7 +4806,7 @@ async def handle_admin_claim(interaction: discord.Interaction, ticket_id: int):
             return
 
         member = interaction.user
-        allowed_role_ids = set(ADMIN_TICKET_VIEW_ROLES)
+        allowed_role_ids = set(get_admin_ticket_view_roles(ticket['ticket_type']))
         member_role_ids = {r.id for r in getattr(member, 'roles', [])}
         if not (allowed_role_ids & member_role_ids):
             await interaction.followup.send(
@@ -4834,10 +4850,7 @@ async def handle_admin_claim(interaction: discord.Interaction, ticket_id: int):
         except Exception:
             pass
 
-        ping_parts = [f"<@{creator_id}>"]
-        for role_id in ADMIN_TICKET_PING_ROLES:
-            ping_parts.append(f"<@&{role_id}>")
-        ping_content = " ".join(ping_parts)
+        ping_content = f"<@{creator_id}>"
 
         claim_embed = discord.Embed(
             description=f"✅ Ticket pris en charge par {member.mention}.",
@@ -4882,7 +4895,7 @@ async def handle_close_admin_ticket(interaction: discord.Interaction, ticket_id:
             await interaction.followup.send("❌ Ticket introuvable.", ephemeral=True)
             return
 
-        allowed_role_ids = set(ADMIN_TICKET_VIEW_ROLES)
+        allowed_role_ids = set(get_admin_ticket_view_roles(ticket['ticket_type']))
         member_role_ids = {r.id for r in getattr(member, 'roles', [])}
         is_creator = str(member.id) == ticket['user_id']
         has_role = bool(allowed_role_ids & member_role_ids)
